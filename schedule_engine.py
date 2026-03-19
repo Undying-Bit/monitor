@@ -60,6 +60,23 @@ def is_tono(msg_time: datetime) -> bool:
     return False
 
 
+def get_window_range(msg_time: datetime) -> Optional[tuple[datetime, datetime]]:
+    """
+    If *msg_time* falls in a window, return (window_start, window_end).
+    Otherwise return None.
+    """
+    window_delta = timedelta(seconds=TONO_WINDOW_SECONDS)
+
+    for w in TONO_WINDOWS:
+        window_start = datetime.combine(msg_time.date(), w)
+        window_end = window_start + window_delta
+
+        if window_start <= msg_time <= window_end:
+            return window_start, window_end
+
+    return None
+
+
 def get_active_windows() -> list[time]:
     """Return the pre-computed list of tono windows (for inspection/testing)."""
     return list(TONO_WINDOWS)

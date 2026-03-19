@@ -59,7 +59,7 @@ def _setup_logging() -> None:
 BANNER = r"""
 ╔══════════════════════════════════════════════╗
 ║      SERVICIO DE MONITOREO TELEGRAM          ║
-║      Pipe-and-Filter Architecture            ║
+║                                              ║
 ╚══════════════════════════════════════════════╝
 """
 

@@ -24,12 +24,9 @@ _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS mensajes (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_id     INTEGER UNIQUE,
-    telefono        TEXT,
     estacion        TEXT,
-    red             TEXT,
     tipo_mensaje    TEXT,
     canal           TEXT,
-    texto           TEXT,
     timestamp       DATETIME,
     tono            BOOLEAN
 );
@@ -38,15 +35,13 @@ CREATE TABLE IF NOT EXISTS mensajes (
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_station_time ON mensajes (estacion, timestamp);",
     "CREATE INDEX IF NOT EXISTS idx_tono_search  ON mensajes (tono);",
-    "CREATE INDEX IF NOT EXISTS idx_phone        ON mensajes (telefono);",
     "CREATE INDEX IF NOT EXISTS idx_timestamp    ON mensajes (timestamp);",
 ]
 
 _INSERT = """
 INSERT OR IGNORE INTO mensajes
-    (telegram_id, telefono, estacion, red,
-     tipo_mensaje, canal, texto, timestamp, tono)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+    (telegram_id, estacion, tipo_mensaje, canal, timestamp, tono)
+VALUES (?, ?, ?, ?, ?, ?);
 """
 
 
@@ -98,12 +93,9 @@ async def insert_message(msg: ParsedMessage) -> bool:
             _INSERT,
             (
                 msg.telegram_id,
-                msg.telefono,
                 msg.estacion,
-                msg.red,
                 msg.tipo_mensaje.value,
                 msg.canal,
-                msg.texto,
                 msg.timestamp.isoformat(),
                 msg.tono,
             ),
@@ -139,6 +131,25 @@ async def get_messages_by_station_date(
             "WHERE estacion = ? AND date(timestamp) = ? "
             "ORDER BY timestamp",
             (station_name, date_str),
-        ) as cursor:
+            ) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+@retry_on_locked()
+async def has_open_and_close(
+    station_name: str, start: datetime, end: datetime
+) -> bool:
+    """
+    Check if the database already contains at least one OPEN and one CLOSE
+    message for the given station within the [start, end] range.
+    """
+    async with aiosqlite.connect(str(PARSED_DB)) as db:
+        async with db.execute(
+            "SELECT COUNT(DISTINCT tipo_mensaje) FROM mensajes "
+            "WHERE estacion = ? AND timestamp BETWEEN ? AND ? "
+            "AND tipo_mensaje IN ('OPEN', 'CLOSE') AND tono = 1",
+            (station_name, start.isoformat(), end.isoformat()),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row is not None and row[0] == 2

@@ -63,6 +63,13 @@ class StationManager:
             return st.red or ""
         return ""
 
+    def get_tx_sarmex(self, station_name: str) -> int:
+        """Return the 'tx sarmex' value for a station (often used as 'type')."""
+        st = self._by_name.get(station_name)
+        if st:
+            return st.tx_sarmex or 0
+        return 0
+
     def resolve_ambiguity(self, phone: str, name_hint: str) -> str:
         """Given an ambiguous phone, use name_hint to pick the right station."""
         candidates = self._by_phone.get(phone, [])
