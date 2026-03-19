@@ -11,7 +11,7 @@ import logging
 
 from models import RawMessage
 from parser_engine import parse
-from schedule_engine import is_tono
+import schedule_engine
 from station_manager import StationManager
 import persistence
 
@@ -76,7 +76,22 @@ class Orchestrator:
             return
 
         # 3. Temporal analysis — tono
-        parsed.tono = is_tono(parsed.timestamp)
+        if not self._station_mgr.lookup_by_phone(parsed.telefono):
+            logger.info(
+                "Skipping unregistered phone %s (telegram_id=%d)",
+                parsed.telefono,
+                raw.telegram_id,
+            )
+            return
+
+        window_range = schedule_engine.get_window_range(parsed.timestamp)
+        parsed.tono = window_range is not None
+
+        # 3.1. Tone logic supplement: If already have OPEN and CLOSE in window, third is not tono
+        if parsed.tono and window_range:
+            start, end = window_range
+            if await persistence.has_open_and_close(parsed.estacion, start, end):
+                parsed.tono = False
 
         # 4. Persist
         inserted = await persistence.insert_message(parsed)

@@ -28,6 +28,10 @@ PARSED_DB = DATABASE_DIR / "mensajes.db"
 
 # ── Telegram ─────────────────────────────────────────────────
 CATCHUP_LIMIT = 100  # messages to scan on restart
+TELEGRAM_TIMEOUT_SECONDS = int(os.getenv("TELEGRAM_TIMEOUT_SECONDS", "20"))
+TELEGRAM_REQUEST_RETRIES = int(os.getenv("TELEGRAM_REQUEST_RETRIES", "10"))
+TELEGRAM_CONNECTION_RETRIES = int(os.getenv("TELEGRAM_CONNECTION_RETRIES", "-1"))
+TELEGRAM_RETRY_DELAY_SECONDS = int(os.getenv("TELEGRAM_RETRY_DELAY_SECONDS", "5"))
 
 # ── Parsing ──────────────────────────────────────────────────
 PHONE_LENGTH = 10

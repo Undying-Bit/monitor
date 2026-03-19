@@ -13,7 +13,17 @@ from datetime import datetime
 
 from telethon import TelegramClient, events
 
-from config import API_ID, API_HASH, GROUP_ID, SESSION_NAME, CATCHUP_LIMIT
+from config import (
+    API_ID,
+    API_HASH,
+    GROUP_ID,
+    SESSION_NAME,
+    CATCHUP_LIMIT,
+    TELEGRAM_TIMEOUT_SECONDS,
+    TELEGRAM_REQUEST_RETRIES,
+    TELEGRAM_CONNECTION_RETRIES,
+    TELEGRAM_RETRY_DELAY_SECONDS,
+)
 from models import RawMessage
 
 logger = logging.getLogger(__name__)
@@ -28,11 +38,20 @@ class TelegramIngress:
 
     async def start(self) -> None:
         """Connect, do catch-up scan, then register live handler."""
-        self._client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+        self._client = TelegramClient(
+            SESSION_NAME,
+            API_ID,
+            API_HASH,
+            timeout=TELEGRAM_TIMEOUT_SECONDS,
+            request_retries=TELEGRAM_REQUEST_RETRIES,
+            connection_retries=TELEGRAM_CONNECTION_RETRIES,
+            retry_delay=TELEGRAM_RETRY_DELAY_SECONDS,
+            auto_reconnect=True,
+        )
         await self._client.start()
 
         me = await self._client.get_me()
-        logger.info("Telegram connected as: %s (id=%s)", me.username, me.id)
+        logger.info("Telegram connected as: %s (id=%s)", f"{me.first_name} {me.last_name or ''}".strip(), me.id)
 
         # ── Catch-up scan ────────────────────────────────────
         await self._catchup()
@@ -56,7 +75,7 @@ class TelegramIngress:
     async def _catchup(self) -> None:
         """Scan the last N messages to fill gaps from downtime."""
         logger.info("Catch-up scan: fetching last %d messages…", CATCHUP_LIMIT)
-        count = 0
+        messages_to_queue: list[RawMessage] = []
         try:
             from telethon.errors.rpcerrorlist import BotMethodInvalidError
             async for message in self._client.iter_messages(
@@ -69,9 +88,13 @@ class TelegramIngress:
                     raw_text=message.text,
                     receive_timestamp=datetime.now(),
                 )
+                messages_to_queue.append(raw)
+            
+            # Reverse: from newest-to-oldest (Telethon default) to oldest-to-newest
+            for raw in reversed(messages_to_queue):
                 await self._queue.put(raw)
-                count += 1
-            logger.info("Catch-up complete: %d messages queued", count)
+                
+            logger.info("Catch-up complete: %d messages queued", len(messages_to_queue))
         except BotMethodInvalidError as e:
             logger.warning("Catch-up disabled: Bots cannot fetch history for this chat (%s)", e)
         except Exception as e:

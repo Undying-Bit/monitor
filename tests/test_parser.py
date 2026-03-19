@@ -34,6 +34,7 @@ def _make_station_manager(
     sm.lookup_by_phone.side_effect = lambda p: _phone_map.get(p, [])
     sm.get_open_close.side_effect = lambda n: _open_close.get(n, ("", ""))
     sm.get_red.side_effect = lambda n: ""
+    sm.get_tx_sarmex.return_value = 0
 
     return sm
 
@@ -49,6 +50,13 @@ class TestTier1Regex:
         assert m.group("date") == "17/03/2026"
         assert m.group("time") == "10:45:00"
         assert m.group("content") == "COLIMA SUP"
+
+    def test_single_digit_hour_match(self):
+        text = "+525561048913 18/03/2026 8:45:19 Restablecimiento"
+        m = TIER1_RE.match(text)
+        assert m is not None
+        assert m.group("time") == "8:45:19"
+        assert m.group("content") == "Restablecimiento"
 
     def test_long_content(self):
         text = "+529876543210 01/01/2026 23:45:30 MENSAJE **/07/21 12:00:00 some text STATION canal 1"
@@ -116,6 +124,20 @@ class TestParsePipeline:
         assert result.timestamp.hour == 14
         assert result.timestamp.minute == 45
 
+    def test_parse_single_digit_hour(self):
+        sm = _make_station_manager(
+            phone_map={"5561048913": ["PC Colima"]},
+            open_close={"PC Colima": ("COLIMA SUP", "Restablecimiento")},
+        )
+        result = parse(
+            "+5561048913 18/03/2026 8:45:19 Restablecimiento",
+            sm,
+        )
+        assert result is not None
+        assert result.timestamp.hour == 8
+        assert result.timestamp.minute == 45
+        assert result.tipo_mensaje == MessageType.CLOSE
+
     def test_close_message(self):
         sm = _make_station_manager(
             phone_map={"5561048913": ["PC Colima"]},
@@ -141,7 +163,37 @@ class TestParsePipeline:
         )
         assert result is not None
         assert result.tipo_mensaje == MessageType.RWT
-        assert result.canal == "canal 2"
+        assert result.canal == "2"
+
+    def test_mensaje_type_b_ch_dash_stores_channel_number(self):
+        sm = _make_station_manager(
+            phone_map={"5561048913": ["PC Colima"]},
+            open_close={"PC Colima": ("COLIMA SUP", "Restablecimiento")},
+        )
+        result = parse(
+            "+5561048913 17/03/2026 12:00:00 MENSAJE 01/07/21 08:45:00 prueba COLIMA CH-3",
+            sm,
+            telegram_id=1008,
+        )
+        assert result is not None
+        assert result.tipo_mensaje == MessageType.RWT
+        assert result.canal == "3"
+
+    def test_type_2_rwt_as_single(self):
+        """Stations with tx_sarmex=2 (Type 2) should classify RWT-patterned msgs as SINGLE."""
+        sm = _make_station_manager(
+            phone_map={"5561048913": ["PC Colima"]},
+        )
+        sm.get_tx_sarmex.return_value = 2
+        
+        result = parse(
+            "+5561048913 17/03/2026 12:00:00 MENSAJE **/07/21 12:00:00 prueba COLIMA canal 2",
+            sm,
+            telegram_id=2001,
+        )
+        assert result is not None
+        assert result.tipo_mensaje == MessageType.SINGLE
+        assert result.canal is None
 
     def test_single_fallback(self):
         sm = _make_station_manager(

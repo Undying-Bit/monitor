@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 TIER1_RE = re.compile(
     r"^(?P<phone>\+\d+)\s+"
     r"(?P<date>\d{2}/\d{2}/\d{4})\s+"
-    r"(?P<time>\d{2}:\d{2}:\d{2})\s+"
+    r"(?P<time>\d{1,2}:\d{2}:\d{2})\s+"
     r"(?P<content>.*)$"
 )
 
@@ -162,7 +162,10 @@ def _classify(
     # Check for Type B (MENSAJE)
     m2 = TIER2_RE.search(content)
     if m2:
-        return MessageType.RWT, m2.group("channel"), m2.group("text")
+        if station_manager.get_tx_sarmex(station_name) == 2:
+            return MessageType.SINGLE, None, content
+        channel = _extract_channel_number(m2.group("channel"))
+        return MessageType.RWT, channel, m2.group("text")
 
     # Check open / close from station config
     open_text, close_text = station_manager.get_open_close(station_name)
@@ -179,3 +182,11 @@ def _classify(
                 return MessageType.CLOSE, None, content
 
     return MessageType.SINGLE, None, content
+
+
+def _extract_channel_number(channel_raw: str) -> Optional[str]:
+    """Return only the numeric part from channel tokens like 'canal 2' or 'CH-3'."""
+    match = re.search(r"\d+", channel_raw or "")
+    if match:
+        return match.group(0)
+    return None
