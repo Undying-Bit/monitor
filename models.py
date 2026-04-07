@@ -1,5 +1,5 @@
 """
-models.py — Pydantic data models for the monitoring pipeline.
+models.py - Pydantic data models for the monitoring pipeline.
 """
 from __future__ import annotations
 
@@ -10,29 +10,78 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class Source(str, Enum):
+    TELEGRAM = "telegram"
+    SERIAL = "serial"
+
+
 class MessageType(str, Enum):
-    """Classification of a parsed message."""
+    """Telegram message classification."""
     OPEN = "OPEN"
     CLOSE = "CLOSE"
     RWT = "RWT"        # Type-B / MENSAJE that isn't open/close
     SINGLE = "SINGLE"  # Unmatched content
 
 
-class RawMessage(BaseModel):
-    """Ingress-level representation straight from Telegram."""
-    telegram_id: int
-    raw_text: str
-    receive_timestamp: datetime
+class RawEvent(BaseModel):
+    """Ingress-level representation for any source."""
+    source: Source
+    source_event_id: Optional[str] = None
+    raw_payload: str
+    received_at: datetime
+    transport_meta: Optional[dict] = None
 
 
-class ParsedMessage(BaseModel):
-    """Fully processed message ready for persistence."""
-    telegram_id: int
-    telefono: str
-    estacion: str
-    red: Optional[str] = None
-    tipo_mensaje: MessageType
-    canal: Optional[str] = None
-    texto: str
-    timestamp: datetime  # Internal msg timestamp (date + time from content)
-    tono: bool = False
+class TelegramParsed(BaseModel):
+    """Parsed Telegram payload (before station resolution)."""
+    phone: str
+    timestamp: datetime
+    content: str
+    is_mensaje: bool = False
+    mensaje_station_hint: Optional[str] = None
+    mensaje_channel_raw: Optional[str] = None
+    mensaje_text: Optional[str] = None
+
+
+class SerialParsed(BaseModel):
+    """Parsed SAME/EAS header from serial payload."""
+    originator: str
+    event_code: str
+    area_codes: list[str]
+    duration_code: str
+    julian_day: int
+    hour: int
+    minute: int
+    transmitter_code: str
+    raw_header: str
+    repeat_count: int = 1
+
+
+class NormalizedEvent(BaseModel):
+    """Normalized event ready for persistence."""
+    raw_event_id: int
+    source: Source
+    station_id: Optional[int] = None
+    station_name: Optional[str] = None
+    station_code: Optional[str] = None
+
+    event_type: str
+    event_class: str
+
+    report_date: Optional[str] = None
+    report_slot: Optional[str] = None
+
+    event_time_local: str
+    event_time_utc: Optional[str] = None
+
+    tone: bool = False
+    priority: int = 0
+    is_valid_report: bool = False
+
+    parser_version: str = "unknown"
+    confidence_score: int = 0
+
+    transmitter_code: Optional[str] = None
+    phone_number: Optional[str] = None
+    channel: Optional[str] = None
+    payload_json: dict = Field(default_factory=dict)

@@ -1,30 +1,32 @@
 """
-telegram_client.py — Telethon-based ingress service.
+telegram_client.py - Telethon-based ingress service.
 
 Connects to Telegram via MTProto, listens for new messages on the
-configured group, and pushes RawMessage objects into an asyncio.Queue.
-On startup, performs a catch-up scan of the last CATCHUP_LIMIT messages.
+configured group, and pushes RawEvent objects into an asyncio.Queue.
+On startup, replays unseen Telegram history using a persisted watermark.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime
+from typing import Any
 
 from telethon import TelegramClient, events
 
+import persistence
 from config import (
     API_ID,
     API_HASH,
     GROUP_ID,
     SESSION_NAME,
-    CATCHUP_LIMIT,
+    TELEGRAM_CATCHUP_OVERLAP_MESSAGES,
     TELEGRAM_TIMEOUT_SECONDS,
     TELEGRAM_REQUEST_RETRIES,
     TELEGRAM_CONNECTION_RETRIES,
     TELEGRAM_RETRY_DELAY_SECONDS,
 )
-from models import RawMessage
+from models import RawEvent, Source
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +34,12 @@ logger = logging.getLogger(__name__)
 class TelegramIngress:
     """Manages the Telethon connection and feeds messages into a queue."""
 
-    def __init__(self, queue: asyncio.Queue[RawMessage]) -> None:
+    def __init__(self, queue: asyncio.Queue[RawEvent]) -> None:
         self._queue = queue
         self._client: TelegramClient | None = None
 
     async def start(self) -> None:
-        """Connect, do catch-up scan, then register live handler."""
+        """Connect, register the live handler, then run catch-up replay."""
         self._client = TelegramClient(
             SESSION_NAME,
             API_ID,
@@ -51,52 +53,88 @@ class TelegramIngress:
         await self._client.start()
 
         me = await self._client.get_me()
-        logger.info("Telegram connected as: %s (id=%s)", f"{me.first_name} {me.last_name or ''}".strip(), me.id)
+        logger.info(
+            "Telegram connected as: %s (id=%s)",
+            f"{me.first_name} {me.last_name or ''}".strip(),
+            me.id,
+        )
 
-        # ── Catch-up scan ────────────────────────────────────
+        self._register_live_handler()
         await self._catchup()
 
-        # ── Live handler ─────────────────────────────────────
+    def _register_live_handler(self) -> None:
+        """Register the live Telegram message handler before catch-up begins."""
+        if self._client is None:
+            raise RuntimeError("Telegram client not initialised")
+
         @self._client.on(events.NewMessage(chats=GROUP_ID))
         async def _on_new_message(event):
-            text = event.message.text
-            if not text:
+            raw = self._message_to_raw_event(event.message)
+            if raw is None:
                 return
-            raw = RawMessage(
-                telegram_id=event.message.id,
-                raw_text=text,
-                receive_timestamp=datetime.now(),
-            )
             await self._queue.put(raw)
-            logger.debug("Queued live msg id=%d", raw.telegram_id)
+            logger.debug("Queued live msg id=%s", raw.source_event_id)
 
         logger.info("Live message handler registered for group %d", GROUP_ID)
 
+    def _message_to_raw_event(self, message: Any) -> RawEvent | None:
+        """Convert a Telethon message into a RawEvent when it has text."""
+        text = getattr(message, "text", None)
+        message_id = getattr(message, "id", None)
+        if not text or message_id is None:
+            return None
+
+        return RawEvent(
+            source=Source.TELEGRAM,
+            source_event_id=str(message_id),
+            raw_payload=text,
+            received_at=datetime.utcnow(),
+            transport_meta={"group_id": GROUP_ID},
+        )
+
     async def _catchup(self) -> None:
-        """Scan the last N messages to fill gaps from downtime."""
-        logger.info("Catch-up scan: fetching last %d messages…", CATCHUP_LIMIT)
-        messages_to_queue: list[RawMessage] = []
+        """Replay unseen history, with a small overlap for startup safety."""
+        if self._client is None:
+            raise RuntimeError("Telegram client not initialised")
+
+        queued_count = 0
+        last_seen_id = await persistence.get_latest_telegram_message_id()
+        overlap = max(0, TELEGRAM_CATCHUP_OVERLAP_MESSAGES)
+        iter_kwargs: dict[str, Any] = {"reverse": True}
+
+        if last_seen_id is None:
+            logger.info(
+                "Catch-up bootstrap: no Telegram watermark found; replaying full history"
+            )
+        else:
+            min_id = max(0, last_seen_id - overlap)
+            iter_kwargs["min_id"] = min_id
+            logger.info(
+                "Catch-up replay: watermark=%d overlap=%d min_id=%d",
+                last_seen_id,
+                overlap,
+                min_id,
+            )
+
         try:
             from telethon.errors.rpcerrorlist import BotMethodInvalidError
+
             async for message in self._client.iter_messages(
-                GROUP_ID, limit=CATCHUP_LIMIT
+                GROUP_ID,
+                **iter_kwargs,
             ):
-                if not message.text:
+                raw = self._message_to_raw_event(message)
+                if raw is None:
                     continue
-                raw = RawMessage(
-                    telegram_id=message.id,
-                    raw_text=message.text,
-                    receive_timestamp=datetime.now(),
-                )
-                messages_to_queue.append(raw)
-            
-            # Reverse: from newest-to-oldest (Telethon default) to oldest-to-newest
-            for raw in reversed(messages_to_queue):
                 await self._queue.put(raw)
-                
-            logger.info("Catch-up complete: %d messages queued", len(messages_to_queue))
+                queued_count += 1
+
+            logger.info("Catch-up complete: %d messages queued", queued_count)
         except BotMethodInvalidError as e:
-            logger.warning("Catch-up disabled: Bots cannot fetch history for this chat (%s)", e)
+            logger.warning(
+                "Catch-up disabled: Bots cannot fetch history for this chat (%s)",
+                e,
+            )
         except Exception as e:
             logger.error("Catch-up scan failed: %s", e)
 
