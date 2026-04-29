@@ -168,6 +168,10 @@ cython_debug/
 logs/
 
 # SQLite databases (let users provide their own estaciones.db)
+tmp/
+.pytest-tmp/
 databases/*.db
 databases/*.sqlite3
 databases/*.sqlite3-journal
+*.db-wal
+*.db-shm

@@ -5,11 +5,13 @@ Wires all modules, sets up logging, and runs the asyncio event loop.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import sys
+from collections.abc import Sequence
 
-from config import APP_LOG, PARSING_ERRORS_LOG, SYSTEM_HEALTH_LOG
+from config import APP_LOG, APP_VERSION, PARSING_ERRORS_LOG, SYSTEM_HEALTH_LOG
 
 
 # ── Logging setup ────────────────────────────────────────────
@@ -66,12 +68,41 @@ BANNER = r"""
 
 # ── Main ─────────────────────────────────────────────────────
 
-async def main() -> None:
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Telegram monitor service.")
+    parser.add_argument(
+        "--telegram-catchup-overlap-messages",
+        type=_positive_int,
+        help=(
+            "Expand the Telegram startup catch-up window to at least this many "
+            "messages behind the stored watermark."
+        ),
+    )
+    parser.add_argument(
+        "--telegram-catchup-last-days",
+        type=_positive_int,
+        help=(
+            "Ignore the stored Telegram watermark for this launch and replay "
+            "messages from the last N days."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+async def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
     _setup_logging()
     logger = logging.getLogger("main")
 
     print(BANNER)
-    logger.info("Initializing Telegram Monitor…")
+    logger.info("Initializing Telegram Monitor v%s...", APP_VERSION)
 
     # Late imports so logging is configured first
     from station_manager import StationManager
@@ -94,7 +125,11 @@ async def main() -> None:
     consumer_task = asyncio.create_task(orch.run())
 
     # 5. Telegram ingress (producer)
-    ingress = TelegramIngress(queue)
+    ingress = TelegramIngress(
+        queue,
+        catchup_overlap_messages=args.telegram_catchup_overlap_messages,
+        catchup_last_days=args.telegram_catchup_last_days,
+    )
     await ingress.start()
 
     logger.info("All modules initialised — entering event loop")
@@ -105,6 +140,7 @@ async def main() -> None:
         logger.info("Shutdown requested by user")
     finally:
         await ingress.stop()
+        await queue.join()
         consumer_task.cancel()
         try:
             await consumer_task

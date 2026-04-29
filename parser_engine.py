@@ -1,24 +1,22 @@
 """
-parser_engine.py — Two-tier regex parser for Telegram messages.
+parser_engine.py - Telegram parsing (regex-based).
 
-Tier 1: Base extraction (phone, date, time, content) — common to all.
-Tier 2: "MENSAJE" (Type B) extraction — station name and channel from body.
+Tier 1: Base extraction (phone, date, time, content).
+Tier 2: "MENSAJE" extraction (station hint + channel).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
-from models import ParsedMessage, MessageType
-
-if TYPE_CHECKING:
-    from station_manager import StationManager
+from models import TelegramParsed
 
 logger = logging.getLogger(__name__)
 
-# ── Tier 1 regex ─────────────────────────────────────────────
+# ── Tier 1 regex ────────────────────────────────────────────────────────────
 # Matches: +PHONE DATE TIME CONTENT
 TIER1_RE = re.compile(
     r"^(?P<phone>\+\d+)\s+"
@@ -27,7 +25,7 @@ TIER1_RE = re.compile(
     r"(?P<content>.*)$"
 )
 
-# ── Tier 2 regex (Type B / MENSAJE) ──────────────────────────
+# ── Tier 2 regex (Type B / MENSAJE) ─────────────────────────────────────────
 # Matches: MENSAJE **/07/21 HH:MM:SS <text> STATION_NAME <channel>
 TIER2_RE = re.compile(
     r"MENSAJE\s+"
@@ -39,8 +37,19 @@ TIER2_RE = re.compile(
     re.IGNORECASE,
 )
 
-# ── Logging for parse failures ───────────────────────────────
+# ── Logging for parse failures ──────────────────────────────────────────────
 _parse_error_logger: Optional[logging.Logger] = None
+
+
+def _sanitize_preview(raw_text: str, limit: int = 120) -> str:
+    compact = " ".join(raw_text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[:limit] + "..."
+
+
+def _payload_fingerprint(raw_text: str) -> str:
+    return hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:12]
 
 
 def _get_parse_error_logger() -> logging.Logger:
@@ -57,23 +66,23 @@ def _get_parse_error_logger() -> logging.Logger:
     return _parse_error_logger
 
 
-def parse(
-    raw_text: str,
-    station_manager: StationManager,
-    telegram_id: int = 0,
-) -> Optional[ParsedMessage]:
+def parse_telegram(raw_text: str) -> Optional[TelegramParsed]:
     """
-    Full parsing pipeline.
+    Parse Telegram message content into a TelegramParsed object.
 
-    Returns a validated ParsedMessage or None if the text is unparseable.
+    Returns None if the text is unparseable.
     """
     if not raw_text or not isinstance(raw_text, str):
         return None
 
-    # ── Tier 1: base extraction ──────────────────────────────
+    # ── Tier 1: base extraction ────────────────────────────────────────────
     m1 = TIER1_RE.match(raw_text.strip())
     if not m1:
-        _get_parse_error_logger().warning("TIER1_FAIL | %s", raw_text)
+        _get_parse_error_logger().warning(
+            "TIER1_FAIL | fingerprint=%s | preview=%s",
+            _payload_fingerprint(raw_text),
+            _sanitize_preview(raw_text),
+        )
         return None
 
     phone_raw = m1.group("phone")
@@ -88,40 +97,29 @@ def parse(
     try:
         timestamp = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%Y %H:%M:%S")
     except ValueError:
-        _get_parse_error_logger().warning("DATE_FAIL | %s", raw_text)
+        _get_parse_error_logger().warning(
+            "DATE_FAIL | fingerprint=%s | preview=%s",
+            _payload_fingerprint(raw_text),
+            _sanitize_preview(raw_text),
+        )
         return None
 
-    # ── Station identification ───────────────────────────────
-    stations = station_manager.lookup_by_phone(phone)
+    # ── Tier 2 hint extraction ─────────────────────────────────────────────
+    m2 = TIER2_RE.search(content)
+    is_mensaje = m2 is not None
+    station_hint = m2.group("station") if m2 else None
+    channel_raw = m2.group("channel") if m2 else None
+    mensaje_text = m2.group("text") if m2 else None
 
-    if not stations:
-        # Unknown phone — still store with a placeholder name
-        station_name = f"Estacion {phone}"
-    elif len(stations) == 1:
-        station_name = stations[0]
-    else:
-        # Ambiguous: try Tier 2 to resolve
-        station_name = _resolve_ambiguous(content, stations, station_manager)
-
-    # ── Classification ───────────────────────────────────────
-    message_type, channel, message_text = _classify(
-        content, station_name, station_manager
-    )
-
-    return ParsedMessage(
-        telegram_id=telegram_id,
-        telefono=phone,
-        estacion=station_name,
-        red=station_manager.get_red(station_name),
-        tipo_mensaje=message_type,
-        canal=channel,
-        texto=message_text or content,
+    return TelegramParsed(
+        phone=phone,
         timestamp=timestamp,
-        # tono will be set by ScheduleEngine later
+        content=content,
+        is_mensaje=is_mensaje,
+        mensaje_station_hint=station_hint,
+        mensaje_channel_raw=channel_raw,
+        mensaje_text=mensaje_text,
     )
-
-
-# ── Helpers ──────────────────────────────────────────────────
 
 
 def _normalize_phone(phone_raw: str) -> str:
@@ -133,60 +131,16 @@ def _normalize_phone(phone_raw: str) -> str:
     return digits[:PHONE_LENGTH]
 
 
-def _resolve_ambiguous(
-    content: str,
-    candidates: list[str],
-    station_manager: StationManager,
-) -> str:
-    """Use Tier 2 regex to pick the right station from ambiguous matches."""
-    m2 = TIER2_RE.search(content)
-    if m2:
-        extracted_name = m2.group("station")
-        for candidate in candidates:
-            if extracted_name.upper() in candidate.upper():
-                return candidate
-    # Fallback: return first candidate
-    return candidates[0]
-
-
-def _classify(
-    content: str,
-    station_name: str,
-    station_manager: StationManager,
-) -> tuple[MessageType, Optional[str], Optional[str]]:
-    """
-    Determine message type, channel, and cleaned text.
-
-    Returns (MessageType, channel_or_None, message_text_or_None).
-    """
-    # Check for Type B (MENSAJE)
-    m2 = TIER2_RE.search(content)
-    if m2:
-        if station_manager.get_tx_sarmex(station_name) == 2:
-            return MessageType.SINGLE, None, content
-        channel = _extract_channel_number(m2.group("channel"))
-        return MessageType.RWT, channel, m2.group("text")
-
-    # Check open / close from station config
-    open_text, close_text = station_manager.get_open_close(station_name)
-
-    if open_text:
-        # open_text may be comma-separated (e.g. "Puebla ALT,Puebla SUP")
-        for token in open_text.split(","):
-            if token.strip() and token.strip() in content:
-                return MessageType.OPEN, None, content
-
-    if close_text:
-        for token in close_text.split(","):
-            if token.strip() and token.strip() in content:
-                return MessageType.CLOSE, None, content
-
-    return MessageType.SINGLE, None, content
-
-
 def _extract_channel_number(channel_raw: str) -> Optional[str]:
     """Return only the numeric part from channel tokens like 'canal 2' or 'CH-3'."""
     match = re.search(r"\d+", channel_raw or "")
     if match:
         return match.group(0)
     return None
+
+
+def extract_channel_number(channel_raw: Optional[str]) -> Optional[str]:
+    """Public helper for channel normalization."""
+    if not channel_raw:
+        return None
+    return _extract_channel_number(channel_raw)
