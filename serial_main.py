@@ -10,7 +10,7 @@ import signal
 import sys
 from collections.abc import Callable
 
-from config import APP_VERSION, SERIAL_PORTS
+from config import SERIAL_PORTS
 from main import _setup_logging
 
 
@@ -67,7 +67,6 @@ def _install_shutdown_handlers(
 async def main() -> None:
     _setup_logging()
     logger = logging.getLogger("serial_main")
-    logger.info("Initializing Serial Monitor v%s...", APP_VERSION)
 
     from station_manager import StationManager
     from orchestrator import Orchestrator
